@@ -121,7 +121,7 @@ class ItemOut(BaseModel):
 
     model_config = ConfigDict()
 
-    # JWT
+# JWT
 def create_access_token(data: dict, expires_delta: dt.timedelta | None = None) -> str:
     to_encode = data.copy()
     expire = dt.datetime.now(dt.timezone.utc) + (expires_delta or dt.timedelta(minutes=ACCESS_TOKEN_EXPIRY))
