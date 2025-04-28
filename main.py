@@ -6,11 +6,8 @@ from pymongo import MongoClient
 from bson import ObjectId
 import datetime as dt
 from datetime import date, datetime
-import jwt
-import re
-import os
+import jwt, os, re
 from dotenv import load_dotenv
-
 
 # Load environment variables
 load_dotenv()
@@ -168,6 +165,7 @@ def register_user(user: UserCreate) -> UserOut:
 @app.post("/login", status_code=200)
 def login_user(request: Request, response: Response, user: UserRead) -> dict:
     db_user = users_collection.find_one({"username": user.username})
+    
     if not db_user or db_user["password"] != user.password:
         raise HTTPException(status_code=401, detail="Invalid credentials.")
     
@@ -205,10 +203,12 @@ def get_all_items(current_user: dict = Depends(get_current_user)) -> list[ItemOu
 def get_item(item_id: str, current_user: dict = Depends(get_current_user)) -> ItemOut:
     oid = validate_object_id(item_id)
     doc = items_collection.find_one({"_id": oid})
+    
     if not doc:
         raise HTTPException(status_code=404, detail="Item not found.")
     if doc["user_id"] != current_user["username"]:
         raise HTTPException(status_code=403, detail="Not authorized to access item.")
+    
     return serialize_item(doc)
 
 # /inventory POST
@@ -216,6 +216,7 @@ def get_item(item_id: str, current_user: dict = Depends(get_current_user)) -> It
 def add_item(item_in: ItemCreate, current_user: dict = Depends(get_current_user)) -> ItemOut:
     if item_in.user_id != current_user["username"]:
         raise HTTPException(status_code=403, detail="Cannot create item for another user.")
+    
     data = item_in.model_dump()
     data["user_id"] = current_user["username"]
     data["last_updated"] = data["last_updated"].isoformat()
@@ -227,10 +228,12 @@ def add_item(item_in: ItemCreate, current_user: dict = Depends(get_current_user)
 def update_item(item_id: str, updated_item: ItemCreate, current_user: dict = Depends(get_current_user)) -> ItemOut:
     oid = validate_object_id(item_id)
     doc = items_collection.find_one({"_id": oid})
+    
     if not doc:
         raise HTTPException(status_code=404, detail="Item not found.")
     if doc["user_id"] != current_user["username"]:
         raise HTTPException(status_code=403, detail="Not authorized to edit item.")
+    
     data = updated_item.model_dump()
     data["last_updated"] = data["last_updated"].isoformat()
     items_collection.update_one({"_id": oid}, {"$set": data})
@@ -241,9 +244,103 @@ def update_item(item_id: str, updated_item: ItemCreate, current_user: dict = Dep
 def delete_item(item_id: str, current_user: dict = Depends(get_current_user)) -> dict:
     oid = validate_object_id(item_id)
     doc = items_collection.find_one({"_id": oid})
+    
     if not doc:
         raise HTTPException(status_code=404, detail="Item not found.")
     if doc["user_id"] != current_user["username"]:
         raise HTTPException(status_code=403, detail="Not authorized to delete item.")
+    
+    items_collection.delete_one({"_id": oid})
+    return {"message": "Item deleted successfully"}
+
+## Admin routes
+
+# Helper function to veify role
+def require_admin(role: str):
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+# /admin/inventory GET
+@app.get("/admin/inventory", response_model=list[ItemOut], status_code=200)
+def admin_get_all_items(current_user: dict = Depends(get_current_user)) -> list[ItemOut]:
+    require_admin(current_user["role"])
+    
+    docs = items_collection.find()
+    return [serialize_item(doc) for doc in docs]
+
+# /admin/inventory/user GET
+@app.get("/admin/inventory/{user}", response_model=list[ItemOut], status_code=200)
+def admin_get_all_user_items(user: str, current_user: dict = Depends(get_current_user)) ->list[ItemOut]:
+    require_admin(current_user["role"])
+    
+    if not users_collection.find_one({"username": user}):
+        raise HTTPException(status_code=404, detail="User does not exist.")
+    
+    docs = items_collection.find({"user_id": user})
+    return [serialize_item(doc) for doc in docs]
+
+# /admin/inventory/user/item_id GET
+@app.get("/admin/inventory/{user}/{item_id}", response_model=ItemOut, status_code=200)
+def admin_get_user_item(user: str, item_id: str, current_user: dict = Depends(get_current_user)) -> ItemOut:
+    require_admin(current_user["role"])
+    
+    if not users_collection.find({"user_id": user}):
+        raise HTTPException(status_code=404, detail="User does not exist.")
+    
+    oid = validate_object_id(item_id)
+    doc = items_collection.find_one({"_id": oid, "user_id": user})
+    
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found for specified user.")
+    
+    return serialize_item(doc)
+
+# /admin/inventory/user POST
+@app.post("/admin/inventory/{user}", response_model=ItemOut, status_code=201)
+def admin_add_item(user: str, item_in: ItemCreate, current_user: dict = Depends(get_current_user)) -> ItemOut:
+    require_admin(current_user["role"])
+    
+    if item_in.user_id != user:
+        raise HTTPException(status_code=403, detail="user_id mismatch.")
+    if not users_collection.find_one({"username": user}):
+        raise HTTPException(status_code=404, detail="User does not exist.")
+    
+    data = item_in.model_dump()
+    data["user_id"] = user
+    data["last_updated"] = data["last_updated"].isoformat()
+    result = items_collection.insert_one(data)
+    return serialize_item(items_collection.find_one({"_id": result.inserted_id}))
+
+# /admin/inventory/user/item_id PUT
+@app.put("/admin/inventory/{user}/{item_id}", response_model=ItemOut, status_code=200)
+def admin_update_item(user: str, item_id: str, updated_item: ItemCreate, current_user: dict = Depends(get_current_user)) -> ItemOut:
+    require_admin(current_user["role"])
+    
+    if updated_item.user_id != user:
+        raise HTTPException(status_code=403, detail="user_id mismatch.")
+    if not users_collection.find_one({"username": user}):
+        raise HTTPException(status_code=404, detail="User does not exist.")
+    
+    oid = validate_object_id(item_id)
+    if not items_collection.find_one({"_id": oid, "user_id": user}):
+        raise HTTPException(status_code=404, detail="Item not found for specified user.")
+    
+    data = updated_item.model_dump()
+    data["last_updated"] = data["last_updated"].isoformat()
+    items_collection.update_one({"_id": oid}, {"$set": data})
+    return serialize_item(items_collection.find_one({"_id": oid}))
+
+# /admin/inventory/user/item_id DELETE
+@app.delete("/admin/inventory/{user}/{item_id}")
+def admin_delete_item(user: str, item_id: str, current_user: dict = Depends(get_current_user)) -> dict:
+    require_admin(current_user["role"])
+    
+    if not users_collection.find_one({"username": user}):
+        raise HTTPException(status_code=404, detail="User does not exist.")
+    
+    oid = validate_object_id(item_id)
+    if not items_collection.find_one({"_id": oid, "user_id": user}):
+        raise HTTPException(status_code=404, detail="Item not found for specified user.")
+    
     items_collection.delete_one({"_id": oid})
     return {"message": "Item deleted successfully"}
