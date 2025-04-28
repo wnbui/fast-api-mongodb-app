@@ -113,7 +113,7 @@ class ItemCreate(BaseModel):
     last_updated: date = Field(..., description="The date must be in format YYY-MM-DD")
 
 class ItemOut(BaseModel):
-    id: int
+    id: str
     user_id: str
     name: str
     description: str
@@ -147,6 +147,12 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token.")
     return {"username": username, "role": role}
+
+# Convert and validate ObjectId, used to validate _id for items
+def validate_object_id(id_str: str) -> ObjectId:
+    if not ObjectId.is_valid(id_str):
+        raise HTTPException(status_code=400, detail="Invalid item ID.")
+    return ObjectId(id_str)
 
 # /register POST
 @app.post("/register", response_model=UserOut, status_code=201)
@@ -189,11 +195,55 @@ def logout(request: Request, response: Response):
 ## User Routes
 
 # /inventory GET
+@app.get("/inventory", response_model=list[ItemOut], status_code=200)
+def get_all_items(current_user: dict = Depends(get_current_user)) -> list[ItemOut]:
+    docs = items_collection.find({"user_ider": current_user["username"]})
+    return [serialize_item(doc) for doc in docs]
 
 # /inventory/item_id GET
+@app.get("/inventory/{item_id}", response_model=ItemOut, status_code=200)
+def get_item(item_id: str, current_user: dict = Depends(get_current_user)) -> ItemOut:
+    oid = validate_object_id(item_id)
+    doc = items_collection.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found.")
+    if doc["user_id"] != current_user["username"]:
+        raise HTTPException(status_code=403, detail="Not authorized to access item.")
+    return serialize_item(doc)
 
 # /inventory POST
+@app.post("/inventory", response_model=ItemOut, status_code=201)
+def add_item(item_in: ItemCreate, current_user: dict = Depends(get_current_user)) -> ItemOut:
+    if item_in.user_id != current_user["username"]:
+        raise HTTPException(status_code=403, detail="Cannot create item for another user.")
+    data = item_in.model_dump()
+    data["user_id"] = current_user["username"]
+    data["last_updated"] = data["last_updated"].isoformat()
+    result = items_collection.insert_one(data)
+    return serialize_item(items_collection.find_one({"_id": result.inserted_id}))
 
 # /inventory/item_id PUT
+@app.put("/inventory/{item_id}", response_model=ItemOut, status_code=200)
+def update_item(item_id: str, updated_item: ItemCreate, current_user: dict = Depends(get_current_user)) -> ItemOut:
+    oid = validate_object_id(item_id)
+    doc = items_collection.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found.")
+    if doc["user_id"] != current_user["username"]:
+        raise HTTPException(status_code=403, detail="Not authorized to edit item.")
+    data = updated_item.model_dump()
+    data["last_updated"] = data["last_updated"].isoformat()
+    items_collection.update_one({"_id": oid}, {"$set": data})
+    return serialize_item(items_collection.find_one({"_id": oid}))
 
 # /inventory/item_id DELETE
+@app.delete("/inventory/{item_id}")
+def delete_item(item_id: str, current_user: dict = Depends(get_current_user)) -> dict:
+    oid = validate_object_id(item_id)
+    doc = items_collection.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found.")
+    if doc["user_id"] != current_user["username"]:
+        raise HTTPException(status_code=403, detail="Not authorized to delete item.")
+    items_collection.delete_one({"_id": oid})
+    return {"message": "Item deleted successfully"}
