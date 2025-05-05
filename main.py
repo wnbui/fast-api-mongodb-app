@@ -195,7 +195,7 @@ def logout(request: Request, response: Response):
 # /inventory GET
 @app.get("/inventory", response_model=list[ItemOut], status_code=200)
 def get_all_items(current_user: dict = Depends(get_current_user)) -> list[ItemOut]:
-    docs = items_collection.find({"user_ider": current_user["username"]})
+    docs = items_collection.find({"user_id": current_user["username"]})
     return [serialize_item(doc) for doc in docs]
 
 # /inventory/item_id GET
